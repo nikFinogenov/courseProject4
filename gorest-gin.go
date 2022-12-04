@@ -3,13 +3,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"example.com/internal/taskstore"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"google.golang.org/api/idtoken"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -24,7 +27,36 @@ func NewTaskServer() *taskServer {
 	store := taskstore.New()
 	return &taskServer{store: store}
 }
-
+func verifyIdToken() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		jwtToken := strings.Replace(c.Request.Header["Authorization"][0], "Bearer ", "", 1)
+		_, err := idtoken.Validate(context.Background(), jwtToken, client_id)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"message": "Unauthorized"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+func tokenTypeValidation() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		_, ok := c.Request.Header["Authorization"]
+		if ok {
+			jwtToken := c.Request.Header["Authorization"][0]
+			if !strings.HasPrefix(jwtToken, "Bearer ") {
+				c.JSON(http.StatusUnauthorized, gin.H{"message": "Unauthorized"})
+				c.Abort()
+				return
+			}
+			c.Next()
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"message": "Unauthorized"})
+			c.Abort()
+			return
+		}
+	}
+}
 func (ts *taskServer) authHandler(c *gin.Context) {
 	type Provider struct {
 		Provider string `form:"provider"`
@@ -35,7 +67,7 @@ func (ts *taskServer) authHandler(c *gin.Context) {
 	var url = "https://accounts.google.com/o/oauth2/v2/auth?client_id=" +
 		client_id +
 		"&response_type=code" +
-		"&scope=openid" +
+		"&scope=openid email profile phone" +
 		"&redirect_uri=" +
 		redirect_url
 
@@ -90,19 +122,31 @@ func (ts *taskServer) authCallbackGETHandler(c *gin.Context) {
 
 	//body =
 	//jwt = resp.Body.
-	fmt.Println("response Body:", gResp.IdToken)
 	c.Redirect(302, origin+"?token="+gResp.IdToken)
-
+	//fmt.Println("response Body:", gResp.IdToken)
 }
 
 func (ts *taskServer) authCallbackPOSTHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, "ok")
 }
 func (ts *taskServer) infoHandler(c *gin.Context) {
+	jwtToken := c.Request.Header["Authorization"][0]
+	jwtToken = strings.Split(jwtToken, " ")[1]
+	payload, _ := idtoken.Validate(context.Background(), jwtToken, client_id)
+	givenName := strings.TrimSuffix(strings.Replace(fmt.Sprintf("&p",
+		payload.Claims["given_name"]),
+		"&p%!(EXTRA string=", "", 1), ")")
 	currentTime := time.Now()
 	c.JSON(http.StatusOK, gin.H{
 		"date":       currentTime.Format("01-02-2006"),
-		"authorName": "Nik",
+		"authorName": givenName,
+		"appName":    "auth"})
+}
+func (ts *taskServer) infoUnsafeHandler(c *gin.Context) {
+	currentTime := time.Now()
+	c.JSON(http.StatusOK, gin.H{
+		"date":       currentTime.Format("01-02-2006"),
+		"authorName": "name",
 		"appName":    "auth"})
 }
 func CORSMiddleware() gin.HandlerFunc {
@@ -116,7 +160,6 @@ func CORSMiddleware() gin.HandlerFunc {
 			c.AbortWithStatus(204)
 			return
 		}
-
 		c.Next()
 	}
 }
@@ -135,7 +178,7 @@ func (ts *taskServer) authJsonRedirect(c *gin.Context) {
 	var url = "https://accounts.google.com/o/oauth2/v2/auth?client_id=" +
 		client_id +
 		"&response_type=code" +
-		"&scope=openid" +
+		"&scope=openid email profile phone" +
 		"&redirect_uri=" +
 		redirect_url
 
@@ -152,7 +195,8 @@ func main() {
 	router.Use(gin.Recovery())
 
 	server := NewTaskServer()
-	router.GET("/info", server.infoHandler)
+	router.GET("/info", tokenTypeValidation(), verifyIdToken(), server.infoHandler)
+	router.GET("/infoUnsafe", server.infoUnsafeHandler)
 	router.POST("/auth", server.authHandler)
 	router.GET("/auth-callback", server.authCallbackGETHandler)
 	router.POST("/auth-callback", server.authCallbackPOSTHandler)
